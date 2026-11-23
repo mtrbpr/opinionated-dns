@@ -1,0 +1,40 @@
+services:
+  senpai:
+    image: debian:bookworm-slim
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq && exec /bin/sh /senpai-refresh.sh
+    volumes:
+      - ./senpai-refresh.sh:/senpai-refresh.sh:ro
+      - resolver-data:/data
+    networks: [dns]
+
+  resolver:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        CARGO_PROFILE: ${CARGO_PROFILE:-release}
+        CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-}
+    image: opinionated-dns
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5355:53/udp"
+      - "127.0.0.1:5355:53/tcp"
+    volumes:
+      - ./config.toml:/config.toml:ro
+      - resolver-data:/data
+    networks:
+      dns:
+        ipv4_address: 172.30.53.53
+
+networks:
+  dns:
+    name: opinionated-dns
+    ipam:
+      config:
+        - subnet: 172.30.53.0/24
+
+volumes:
+  resolver-data:

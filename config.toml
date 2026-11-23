@@ -1,0 +1,6 @@
+listen = "127.0.0.1:5355"
+data_dir = "data"
+cold_wait_ms = 2500
+iranian_timeout_ms = 800
+recursion_timeout_ms = 2000
+probe_timeout_ms = 800
