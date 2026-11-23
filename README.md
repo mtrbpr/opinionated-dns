@@ -18,6 +18,104 @@ A single recursive lookup returns whatever one path can see, and it blocks the c
 
 The response header has `RA=1` and `AA=0`. NS and glue from the in-process walk are added to the additional section when they fit. DNSSEC validation is off and the AD bit stays clear, because a merged set cannot keep one upstream signature.
 
+## Flows
+
+### A query, from the listen port to the reply
+
+```mermaid
+flowchart TD
+  client([Client]) --> listen[[One listen port]]
+  listen --> cache[(SQLite cache)]
+  cache -->|positive, fresh or stale| immediate([Answer immediately])
+  immediate -->|retry is due| background[Refresh in the background]
+  cache -->|negative, still inside the retry window| servfail([SERVFAIL])
+  cache -->|no positive answer| fanout{{One shared refresh}}
+  fanout --> wait[Wait up to 2.5 seconds]
+  wait -->|addresses already stored| partial([Return that partial union])
+  wait -->|nothing stored yet| servfail
+  fanout --> later[Replies that arrive later merge into the same cache entry]
+```
+
+A second query for the same name joins the refresh already in flight. The next query after the merge is a cache hit.
+
+### Where the addresses come from
+
+These run together. Resolver and relay addresses are how the queries are sent. They are not the A records that get returned.
+
+```mermaid
+flowchart LR
+  query([A query]) --> rec[In-process recursion]
+  query --> discovered[Plain DNS on port 53 to every discovered resolver and relay]
+  query --> iranian[Iranian resolvers]
+  query --> siblings[Sibling names, recursor only]
+  query --> geo[One live proxy per country]
+  rec --> union{{Union}}
+  discovered --> union
+  iranian --> union
+  siblings --> union
+  geo --> union
+  union --> auth[Authoritative servers inside Iranian prefixes]
+  auth --> poison[Drop poisoned ranges]
+  poison --> cloud{Cloudflare name?}
+  cloud -->|yes| senpai[Add SenPaiScanner edge addresses]
+  cloud -->|no| rank[Probe order]
+  senpai --> rank
+  rank --> ten([At most 10 A records])
+```
+
+### Where recursion starts
+
+```mermaid
+flowchart TD
+  name([Queried name]) --> zone{Name is under .ir?}
+  zone -->|yes| irnic[IRNIC]
+  irnic --> i1[193.189.123.2]
+  irnic --> i2[193.189.122.83]
+  irnic --> i3[194.225.70.83]
+  irnic --> i4[45.93.171.206]
+  zone -->|no| roots[13 IANA root A addresses]
+  i1 --> walk[Follow referrals, 2 second limit]
+  i2 --> walk
+  i3 --> walk
+  i4 --> walk
+  roots --> walk
+```
+
+### One country, at query time
+
+The country list is only a candidate list. A proxy is accepted when it returns a real answer for the queried name. An answer made only of poisoned addresses is skipped.
+
+```mermaid
+flowchart TD
+  country([Country]) --> proxy[Next proxy, up to 12]
+  proxy --> order[Prefer socks5, then socks4, then http, then https]
+  order --> doh1[DoH 1.1.1.1:443]
+  doh1 -->|usable answer| keep([Merge into the A union])
+  doh1 -->|no| doh2[DoH 8.8.8.8:443]
+  doh2 -->|usable answer| keep
+  doh2 -->|no| dot1[DoT 1.1.1.1:853]
+  dot1 -->|usable answer| keep
+  dot1 -->|no| dot2[DoT 8.8.8.8:853]
+  dot2 -->|usable answer| keep
+  dot2 -->|no answer within 8 seconds| proxy
+```
+
+At most 16 countries do this at once.
+
+### Order of the A records that are served
+
+Faster handshakes come first inside a tier. The probe uses the queried name as SNI. Up to 64 addresses are stored, so a later probe can promote one that was left out of the first reply.
+
+```mermaid
+flowchart LR
+  verified([Verified TLS]) --> hello[ServerHello]
+  hello --> http[HTTP]
+  http --> tcp443[TCP 443]
+  tcp443 --> tcp80[TCP 80]
+  tcp80 --> unprobed[Not probed yet]
+  unprobed --> failed[Every check failed]
+```
+
 ## How an A answer is built
 
 Every source below contributes addresses. Resolver and relay addresses are never returned as the answer. `10.10.0.0/16` (the Iranian filter sink, including `10.10.34.34`), `0.0.0.0/8`, `127.0.0.0/8`, `224.0.0.0/4`, and `255.255.255.255` are dropped. Other addresses in `10.0.0.0/8`, including `10.202.0.0/16`, are kept.
